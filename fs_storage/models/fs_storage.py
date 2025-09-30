@@ -63,7 +63,7 @@ def deprecated(reason):
 
 class FSStorage(models.Model):
     _name = "fs.storage"
-    _inherit = "server.env.mixin"
+    # _inherit = "server.env.mixin"
     _description = "FS Storage"
 
     __slots__ = ("__fs", "__odoo_storage_path")
