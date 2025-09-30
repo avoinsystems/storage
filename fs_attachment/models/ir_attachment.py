@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import logging
 import mimetypes
@@ -19,7 +20,7 @@ from slugify import slugify  # pylint: disable=missing-manifest-dependency
 import odoo
 from odoo import _, api, fields, models
 from odoo.exceptions import AccessError, UserError
-from odoo.osv.expression import AND, OR, normalize_domain
+from odoo.orm.domains import Domain
 
 from .strtobool import strtobool
 
@@ -163,14 +164,13 @@ class IrAttachment(models.Model):
         The domain must be inline with the conditions in
         ``_store_in_db_instead_of_object_storage``.
         """
-        domain = []
+        domain = Domain.FALSE
         storage_config = self._get_storage_force_db_config()
         for mimetype_key, limit in storage_config.items():
-            part = [("mimetype", "=like", f"{mimetype_key}%")]
+            part = Domain("mimetype", "=like", f"{mimetype_key}%")
             if limit:
-                part = AND([part, [("file_size", "<=", limit)]])
-            # OR simplifies to [(1, '=', 1)] if a domain being OR'ed is empty
-            domain = OR([domain, part]) if domain else part
+                part &= Domain("file_size", "<=", limit)
+            domain |= part
         return domain
 
     def _store_in_db_instead_of_object_storage(self, data, mimetype):
@@ -222,29 +222,26 @@ class IrAttachment(models.Model):
                 return len(bin_data) <= limit
         return False
 
-    def _get_datas_related_values(self, data, mimetype):
+    @api.model
+    def _get_path(self, bin_data, sha):
         storage = self.env.context.get("storage_location") or self._storage()
-        if data and storage in self._get_storage_codes():
-            if self._store_in_db_instead_of_object_storage(data, mimetype):
-                # compute the fields that depend on datas
-                bin_data = data
-                values = {
-                    "file_size": len(bin_data),
-                    "checksum": self._compute_checksum(bin_data),
-                    "index_content": self._index(bin_data, mimetype),
-                    "store_fname": False,
-                    "db_datas": data,
-                }
-                return values
-        return super(
-            IrAttachment, self.with_context(mimetype=mimetype)
-        )._get_datas_related_values(data, mimetype)
+        if storage not in self._get_storage_codes():
+            return super()._get_path(bin_data, sha)
+        path = self._get_fs_path(storage, bin_data)
+        dirname = os.path.dirname(path)
+        fs = self._get_fs_storage_for_code(storage)
+        if not fs.exists(dirname):
+            fs.makedirs(dirname)
+        fname = f"{storage}://{path}"
+        return fname, path
 
     ###########################################################
     # Odoo methods that we override to use the object storage #
     ###########################################################
     @api.model
     def _storage(self):
+        if force_storage := self.env.context.get("force_storage"):
+            return force_storage
         # We check if a filesystem storage is configured for attachments
         storage = self.env["fs.storage"].get_default_storage_code_for_attachments()
         if not storage:
@@ -261,22 +258,29 @@ class IrAttachment(models.Model):
         is to pass them into the context, and perform 1 create call per record
         to create.
         """
-        vals_list_no_model = []
         attachments = self.env["ir.attachment"]
-        for vals in vals_list:
-            if vals.get("res_model"):
-                attachment = super(
-                    IrAttachment,
-                    self.with_context(
-                        attachment_res_model=vals.get("res_model"),
-                        attachment_res_field=vals.get("res_field"),
-                    ),
-                ).create(vals)
-                attachments += attachment
-            else:
-                vals_list_no_model.append(vals)
-        atts = super().create(vals_list_no_model)
-        attachments |= atts
+        for values in vals_list:
+            context = {}
+            storage = self.env.context.get("storage_location") or self._storage()
+            values = self._check_contents(values)
+            raw, datas = values.get('raw', None), values.get('datas', None)
+            if raw or datas:
+                if isinstance(raw, str):
+                    # b64decode handles str input but raw needs explicit encoding
+                    raw = raw.encode()
+                elif not raw:
+                    raw = base64.b64decode(datas or b'')
+            if raw and storage in self._get_storage_codes():
+                if self._store_in_db_instead_of_object_storage(raw, values['mimetype']):
+                    context["force_storage"] = "db"
+
+            if values.get("res_model"):
+                context.update(
+                    attachment_res_model=values.get("res_model"),
+                    attachment_res_field=values.get("res_field"),
+                )
+
+            attachments |= super(IrAttachment, self.with_context(**context)).create(values)
         attachments._enforce_meaningful_storage_filename()
         return attachments
 
@@ -359,7 +363,14 @@ class IrAttachment(models.Model):
             super()._file_delete(fname)
 
     def _set_attachment_data(self, asbytes) -> None:  # pylint: disable=missing-return
-        super()._set_attachment_data(asbytes)
+        for attach in self:
+            context = {}
+            storage = self.env.context.get("storage_location") or self._storage()
+            data = asbytes(attach)
+            if data and storage in self._get_storage_codes():
+                if self._store_in_db_instead_of_object_storage(data, attach.mimetype):
+                    context["force_storage"] = "db"
+            super(IrAttachment, attach.with_context(**context))._set_attachment_data(asbytes)
         self._enforce_meaningful_storage_filename()
 
     ##############################################
@@ -681,9 +692,10 @@ class IrAttachment(models.Model):
         self.ensure_one()
         _logger.info("inspecting attachment %s (%d)", self.name, self.id)
         fname = self.store_fname
-        storage = fname.partition("://")[0]
-        if self._is_storage_disabled(storage):
-            fname = False
+        if fname:
+            storage = fname.partition("://")[0]
+            if self._is_storage_disabled(storage):
+                fname = False
         if fname:
             # migrating from filesystem filestore
             # or from the old 'store_fname' without the bucket name
@@ -746,21 +758,19 @@ class IrAttachment(models.Model):
             )
             return
 
-        domain = AND(
-            (
-                normalize_domain(
-                    [
-                        ("store_fname", "=like", f"{storage}://%"),
-                        # for res_field, see comment in
-                        # _force_storage_to_object_storage
-                        "|",
-                        ("res_field", "=", False),
-                        ("res_field", "!=", False),
-                    ]
-                ),
-                normalize_domain(self._store_in_db_instead_of_object_storage_domain()),
-            )
-        )
+        domain = Domain.AND([
+            Domain(
+                [
+                    ("store_fname", "=like", f"{storage}://%"),
+                    # for res_field, see comment in
+                    # _force_storage_to_object_storage
+                    "|",
+                    ("res_field", "=", False),
+                    ("res_field", "!=", False),
+                ]
+            ),
+            self._store_in_db_instead_of_object_storage_domain(),
+        ])
 
         with self._do_in_new_env(new_cr=new_cr) as new_env:
             model_env = new_env["ir.attachment"].with_context(prefetch_fields=False)
@@ -812,6 +822,7 @@ class IrAttachment(models.Model):
         domain = [
             "!",
             ("store_fname", "=like", f"{storage}://%"),
+            ("type", "=", "binary"),
             "|",
             ("res_field", "=", False),
             ("res_field", "!=", False),

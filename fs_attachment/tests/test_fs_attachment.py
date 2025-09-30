@@ -3,6 +3,7 @@
 import os
 from unittest import mock
 
+from odoo.orm.domains import Domain
 from odoo.tools import mute_logger
 
 from .common import MyException, TestFSAttachmentCommon
@@ -396,7 +397,7 @@ class TestFSAttachment(TestFSAttachmentCommon):
         group_user = self.env.ref("base.group_user")
         group_partner_manager = self.env.ref("base.group_partner_manager")
         demo_user.write(
-            {"groups_id": [(6, 0, [group_user.id, group_partner_manager.id])]}
+            {"group_ids": [(6, 0, [group_user.id, group_partner_manager.id])]}
         )
         # Create basic attachment
         self.ir_attachment_model.with_user(demo_user).create(
@@ -479,11 +480,11 @@ class TestFSAttachment(TestFSAttachmentCommon):
         )
         self.assertEqual(
             self.env["ir.attachment"]._store_in_db_instead_of_object_storage_domain(),
-            [
+            Domain([
                 "|",
                 ("mimetype", "=like", "text/plain%"),
                 "&",
                 ("mimetype", "=like", "image/png%"),
                 ("file_size", "<=", 100),
-            ],
+            ]),
         )

@@ -1,10 +1,9 @@
 # Copyright 2023 ACSONE SA/NV
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl).
 import logging
-import threading
 from contextlib import closing, contextmanager
 
-from odoo import api, fields, models
+from odoo import api, fields, models, modules
 from odoo.sql_db import Cursor
 
 _logger = logging.getLogger(__name__)
@@ -29,10 +28,7 @@ class FsFileGC(models.Model):
         """Return True if we are running the tests, so we do not mark files for
         garbage collection into a separate transaction.
         """
-        return (
-            getattr(threading.current_thread(), "testing", False)
-            or self.env.registry.in_test_mode()
-        )
+        return bool(modules.module.current_test)
 
     @contextmanager
     def _in_new_cursor(self) -> Cursor:
@@ -101,7 +97,7 @@ class FsFileGC(models.Model):
         # the LOCK statement will wait until those concurrent transactions end.
         # But this transaction will not see the new attachements if it has done
         # other requests before the LOCK (like the method _storage() above).
-        cr = self._cr
+        cr = self.env.cr
         cr.commit()  # pylint: disable=invalid-commit
 
         # prevent all concurrent updates on ir_attachment and fs_file_gc
@@ -125,7 +121,7 @@ class FsFileGC(models.Model):
         if not codes:
             return
         # we process by batch of storage codes.
-        self._cr.execute(
+        self.env.cr.execute(
             """
             SELECT
                 fs_storage_code,
@@ -145,7 +141,7 @@ class FsFileGC(models.Model):
             """,
             (tuple(codes),),
         )
-        for code, store_fnames in self._cr.fetchall():
+        for code, store_fnames in self.env.cr.fetchall():
             self.env["fs.storage"].get_by_code(code)
             fs = self.env["fs.storage"].get_fs_by_code(code)
             for store_fname in store_fnames:
@@ -156,7 +152,7 @@ class FsFileGC(models.Model):
                     _logger.debug("Failed to remove file %s", store_fname)
 
         # delete the records from the table fs_file_gc
-        self._cr.execute(
+        self.env.cr.execute(
             """
             DELETE FROM
                 fs_file_gc
