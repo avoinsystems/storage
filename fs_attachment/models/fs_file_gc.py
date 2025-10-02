@@ -147,7 +147,7 @@ class FsFileGC(models.Model):
             for store_fname in store_fnames:
                 try:
                     file_path = store_fname.partition("://")[2]
-                    fs.rm(file_path)
+                    fs.rm_file(file_path)
                 except Exception:
                     _logger.debug("Failed to remove file %s", store_fname)
 
