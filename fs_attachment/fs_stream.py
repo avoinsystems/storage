@@ -5,8 +5,6 @@ from __future__ import annotations
 from odoo.http import STATIC_CACHE_LONG, Response, Stream, request
 from odoo.tools import config
 
-from .models.ir_attachment import IrAttachment
-
 try:
     from werkzeug.utils import send_file as _send_file
 except ImportError:
@@ -17,7 +15,7 @@ class FsStream(Stream):
     fs_attachment = None
 
     @classmethod
-    def from_fs_attachment(cls, attachment: IrAttachment) -> FsStream:
+    def from_fs_attachment(cls, attachment: 'IrAttachment') -> FsStream:
         attachment.ensure_one()
         if not attachment.fs_filename:
             raise ValueError("Attachment is not stored into a filesystem storage")
@@ -93,7 +91,7 @@ class FsStream(Stream):
         return res
 
     @classmethod
-    def _check_use_x_sendfile(cls, attachment: IrAttachment) -> bool:
+    def _check_use_x_sendfile(cls, attachment: 'IrAttachment') -> bool:
         return (
             config["x_sendfile"]
             and attachment.fs_url

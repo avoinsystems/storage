@@ -24,6 +24,8 @@ from odoo.orm.domains import Domain
 
 from .strtobool import strtobool
 
+from ..fs_stream import FsStream
+
 _logger = logging.getLogger(__name__)
 
 
@@ -372,6 +374,12 @@ class IrAttachment(models.Model):
                     context["force_storage"] = "db"
             super(IrAttachment, attach.with_context(**context))._set_attachment_data(asbytes)
         self._enforce_meaningful_storage_filename()
+
+    def _to_http_stream(self):
+        if self.fs_filename:
+            return FsStream.from_fs_attachment(self)
+        else:
+            return super()._to_http_stream()
 
     ##############################################
     # Internal methods to use the object storage #
